@@ -106,7 +106,7 @@ TEST 4  Byte/halfword    18 instr   1 stall    0 flushes   CPI 4.44 *
 TEST 5  Bubble sort     226 instr  28 stalls  38 flushes   CPI 2.21
 ```
 
-\* Tests 1, 2, 4 CPI is dominated by pipeline startup/drain overhead due to short instruction counts. Test 5 (bubble sort) is the meaningful CPI benchmark — long enough that startup overhead is negligible.
+\* Tests 1, 2, 4 CPI is dominated by pipeline startup/drain overhead due to short instruction counts. Test 5 (bubble sort) is the meaningful CPI benchmark since it is long enough that startup overhead is negligible.
 
 **Bubble sort breakdown:**
 - 28 load-use stalls — one per inner loop iteration (lw→lw back-to-back)
@@ -125,15 +125,15 @@ TEST 5  Bubble sort     226 instr  28 stalls  38 flushes   CPI 2.21
 **Synthesis:**
 1. Set `riscv_pipe` as the synthesis top
 2. Add `constraints/riscv_pipe.xdc`
-3. Run synthesis — expect ~1,256 LUTs, 577 FFs, timing met at 67 MHz
+3. Run synthesis — results were ~1,256 LUTs, 577 FFs, timing met at 67 MHz
 
 ---
 
 ## Design decisions
 
-**EX-stage branch resolution** reduces the branch penalty from 3 cycles to 2 cycles compared to MEM-stage resolution. For a branch-heavy workload like the Fibonacci test (9 taken branches), this saves 9 cycles — measurable at this scale.
+**EX-stage branch resolution** reduces the branch penalty from 3 cycles to 2 cycles compared to MEM-stage resolution. To test branch-heavy work I used the Fibonacci test (9 taken branches), where 9 cycles are saved.
 
-**SLT for branch ALU operation** — using SUB result[0] as a less-than signal is unreliable because the LSB of a difference depends on operand parity, not magnitude. SLT gives result[0] = 1 iff rs1 < rs2 (signed), which is the correct and robust test.
+**SLT for branch ALU operation** — using SUB result[0] as a less-than signal is unreliable because the LSB of a difference depends on operand parity. SLT gives result[0] = 1 if rs1 < rs2 (signed), which is the correct and robust test.
 
 **Write-through register file** — the regfile forwards WB data to read ports combinationally when rs1/rs2 matches the write address. This eliminates one forwarding hazard case and keeps the forwarding unit simpler.
 
