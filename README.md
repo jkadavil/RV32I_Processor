@@ -126,15 +126,3 @@ TEST 5  Bubble sort     226 instr  28 stalls  38 flushes   CPI 2.21
 1. Set `riscv_pipe` as the synthesis top
 2. Add `constraints/riscv_pipe.xdc`
 3. Run synthesis — results were ~1,256 LUTs, 577 FFs, timing met at 67 MHz
-
----
-
-## Design decisions
-
-**EX-stage branch resolution** reduces the branch penalty from 3 cycles to 2 cycles compared to MEM-stage resolution. To test branch-heavy work I used the Fibonacci test (9 taken branches), where 9 cycles are saved.
-
-**SLT for branch ALU operation** — using SUB result[0] as a less-than signal is unreliable because the LSB of a difference depends on operand parity. SLT gives result[0] = 1 if rs1 < rs2 (signed), which is the correct and robust test.
-
-**Write-through register file** — the regfile forwards WB data to read ports combinationally when rs1/rs2 matches the write address. This eliminates one forwarding hazard case and keeps the forwarding unit simpler.
-
-**Byte-addressable data memory** — `data_mem` uses byte enables for sub-word writes and mux logic for sub-word reads, supporting all five RV32I load widths and three store widths without requiring separate byte memories.
