@@ -1,128 +1,436 @@
 # RV32I 5-Stage Pipelined Processor
 
-A fully functional 32-bit RISC-V (RV32I) processor implemented in Verilog, featuring a 5-stage pipeline with hazard detection, data forwarding, and byte-addressable memory.
+A 32-bit RV32I processor implemented in Verilog using a classic five-stage pipeline with data forwarding, hazard detection, control-hazard recovery, byte-addressable memory, and directed verification.
 
-## Key metrics
-
-| Metric | Value |
-|---|---|
-| Technology | Xilinx Artix-7 (xc7a35t) |
-| LUT utilization | 1,256 LUTs (2.36%) |
-| Flip-flops | 577 FFs (0.54%) |
-| Fmax | 67.3 MHz |
-| Bubble sort CPI | 2.21 (226 instr, 28 stalls, 38 flushes) |
-
----
+The processor was designed and verified in AMD Vivado targeting the Xilinx Zynq-7000 XC7Z020 (`xc7z020clg400-1`).
 
 ## Architecture
 
-### Pipeline stages
+The processor uses the classic five-stage RISC-V pipeline:
 
-| Stage | Module | Function |
-|---|---|---|
-| IF | `instr_mem` | Fetch instruction at PC |
-| ID | `regfile`, `imm_gen`, `control_unit` | Decode, read registers, generate immediate |
-| EX | `alu`, forwarding muxes | Execute, compute branch target |
-| MEM | `data_mem` | Load / store with byte/halfword support |
-| WB | — | Write result back to register file |
-
-### Pipeline registers
-
-`if_id_reg` → `id_ex_reg` → `ex_mem_reg` → `mem_wb_reg`
-
-Each register supports flush (inject NOP bubble) and stall (hold current value) independently.
-
-### Hazard handling
-
-**Load-use stalls** (`hazard_unit`): When a load in EX is followed immediately by an instruction that reads its destination, the pipeline stalls for one cycle — PC and IF/ID freeze, a bubble is injected into ID/EX.
-
-**Data forwarding** (`forwarding_unit`): Resolves RAW hazards without stalling by routing the most recent available value back to EX inputs. Priority: MEM result (2'b10) > WB result (2'b01) > register file (2'b00).
-
-**Branch resolution**: Taken branches are resolved in the **EX stage**, flushing 2 instructions (IF and ID). This is one cycle better than MEM-stage resolution. `ex_pc_sel = ex_branch_taken | ex_jump` drives the PC redirect and pipeline flush.
-
-**Branch condition**: The ALU computes SLT (signed less-than) for branch instructions. `result[0] = 1` means rs1 < rs2. BEQ/BNE use `alu_zero`; BLT/BGE use `alu_result[0]`.
-
----
-
-## Supported instructions
-
-**R-type:** ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
-
-**I-type:** ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU
-
-**Load:** LW, LH, LB, LHU, LBU
-
-**Store:** SW, SH, SB
-
-**Branch:** BEQ, BNE, BLT, BGE, BLTU, BGEU
-
-**Jump:** JAL, JALR
-
-**Upper immediate:** LUI, AUIPC
-
----
-
-## File structure
-
-```
-src/
-  riscv_pipe.v        — top-level pipeline
-  instr_mem.v         — instruction memory (256 words)
-  data_mem.v          — data memory, byte/halfword access
-  regfile.v           — 32×32 register file, write-through forwarding
-  control_unit.v      — combinational decode
-  alu.v               — 10-operation ALU
-  imm_gen.v           — immediate generator (all formats)
-  if_id_reg.v         — IF/ID pipeline register
-  id_ex_reg.v         — ID/EX pipeline register
-  ex_mem_reg.v        — EX/MEM pipeline register
-  mem_wb_reg.v        — MEM/WB pipeline register
-  hazard_unit.v       — load-use stall detection
-  forwarding_unit.v   — MEM/WB→EX forwarding
-
-sim/
-  tb_riscv_pipe.v     — testbench (5 tests)
-  test1.mem           — ALU operations
-  test2.mem           — word load/store
-  test3.mem           — Fibonacci (branch-heavy)
-  test4.mem           — byte/halfword memory
-  test5_bubblesort.mem — bubble sort benchmark
-
-constraints/
-  riscv_pipe.xdc      — Artix-7 timing constraints (67 MHz)
+```text
+IF → ID → EX → MEM → WB
 ```
 
----
+The stages are separated by four pipeline registers:
 
-## Simulation results
-
-All 5 tests pass with automated PASS/FAIL checking.
-
+```text
+PC / Instruction Memory
+        │
+        ▼
+       IF
+        │
+     IF/ID
+        │
+        ▼
+       ID
+        │
+     ID/EX
+        │
+        ▼
+       EX
+        │
+     EX/MEM
+        │
+        ▼
+       MEM
+        │
+     MEM/WB
+        │
+        ▼
+       WB
 ```
-TEST 1  ALU ops          10 instr   0 stalls   0 flushes   CPI 4.00 *
-TEST 2  Load/store        8 instr   2 stalls   0 flushes   CPI 7.50 *
-TEST 3  Fibonacci        54 instr   0 stalls   9 flushes   CPI 2.04
-TEST 4  Byte/halfword    18 instr   1 stall    0 flushes   CPI 4.44 *
-TEST 5  Bubble sort     226 instr  28 stalls  38 flushes   CPI 2.21
+
+### Instruction Fetch — IF
+
+The fetch stage maintains the program counter and reads the current instruction from instruction memory.
+
+Normally:
+
+```text
+PCnext = PC + 4
 ```
 
-\* Tests 1, 2, 4 CPI is dominated by pipeline startup/drain overhead due to short instruction counts. Test 5 (bubble sort) is the meaningful CPI benchmark since it is long enough that startup overhead is negligible.
+A taken branch or jump redirects the PC to the target address. A load-use hazard can hold the PC while a pipeline bubble is inserted.
 
-**Bubble sort breakdown:**
-- 28 load-use stalls — one per inner loop iteration (lw→lw back-to-back)
-- 38 branch flushes — back-edge branches (2 cycles each) plus taken no-swap branches
-- Input: [64, 25, 12, 22, 11, 90, 3, 47] → Output: [3, 11, 12, 22, 25, 47, 64, 90] ✓
+Control-flow redirection has priority over a data-hazard stall so a wrong-path instruction cannot prevent a resolved branch or jump from redirecting execution.
 
----
+### Instruction Decode — ID
 
-## Running in Vivado
+The decode stage:
 
-**Simulation:**
-1. Add all `src/` and `sim/` files to the project
-2. Set `tb_riscv_pipe` as the simulation top
-3. Run simulation for at least 25 µs
+* extracts `rs1`, `rs2`, `rd`, `funct3`, `funct7`, and opcode
+* reads the register file
+* generates immediate values
+* generates control signals
+* identifies whether the instruction actually consumes `rs1` and/or `rs2`
 
-**Synthesis:**
-1. Set `riscv_pipe` as the synthesis top
-2. Add `constraints/riscv_pipe.xdc`
-3. Run synthesis — results were ~1,256 LUTs, 577 FFs, timing met at 67 MHz
+Source-use information is passed into the hazard logic to prevent false dependencies on instruction fields that are not actually register operands.
+
+### Execute — EX
+
+The execute stage contains:
+
+* ALU
+* operand forwarding multiplexers
+* signed and unsigned branch comparison
+* branch target generation
+* JAL/JALR target generation
+
+Forwarding allows dependent instructions to consume recently generated values without waiting for those values to be written back to the register file.
+
+Conditional branches are resolved in EX.
+
+Supported branch comparisons include:
+
+```text
+BEQ
+BNE
+BLT
+BGE
+BLTU
+BGEU
+```
+
+Both signed and unsigned comparisons are implemented explicitly.
+
+### Memory — MEM
+
+The memory stage supports byte, halfword, and word accesses.
+
+Supported load instructions:
+
+```text
+LB
+LH
+LW
+LBU
+LHU
+```
+
+Supported store instructions:
+
+```text
+SB
+SH
+SW
+```
+
+Store data participates in the forwarding network so an ALU result can be stored by a following instruction without waiting for register-file writeback.
+
+### Writeback — WB
+
+The writeback stage selects the architectural value written to `rd`.
+
+Possible sources include:
+
+```text
+ALU result
+Memory load data
+PC + 4
+```
+
+`PC + 4` is used for JAL and JALR link-register writeback.
+
+The final writeback value also participates in forwarding, allowing jump link values and other results to be consumed by dependent instructions.
+
+## Hazard Handling
+
+### EX/MEM Forwarding
+
+When an instruction in EX depends on a value produced by an older instruction, the forwarding unit can bypass the result directly into the ALU operands.
+
+Conceptually:
+
+```text
+EX/MEM result ─────┐
+                   │
+MEM/WB result ─────┼──► Forwarding MUX ──► ALU
+                   │
+Register value ────┘
+```
+
+EX/MEM forwarding receives priority because it contains the most recent matching result.
+
+### Load-Use Hazard
+
+A load cannot provide its memory result early enough for an immediately following dependent instruction.
+
+For:
+
+```asm
+lw   x5, 0(x1)
+add  x6, x5, x2
+```
+
+the processor inserts one bubble.
+
+The hazard unit:
+
+```text
+holds PC
+holds IF/ID
+flushes ID/EX
+```
+
+After the bubble, the loaded value can be forwarded from the writeback path.
+
+Hazard detection uses source-operand information so fields that only resemble register numbers do not generate false stalls.
+
+### Control Hazards
+
+Branches and jumps are resolved in EX.
+
+When a redirect occurs:
+
+```text
+EX resolves branch/jump
+        │
+        ▼
+new PC selected
+        │
+        ├── flush IF/ID
+        └── flush ID/EX
+```
+
+The branch or jump itself continues into MEM. Only the younger wrong-path instructions are removed.
+
+This is particularly important for JAL and JALR because the redirecting instruction must remain in the pipeline long enough to write `PC + 4` into its destination register.
+
+## Supported RV32I Instructions
+
+### Integer Arithmetic
+
+```text
+ADD   SUB
+ADDI
+```
+
+### Logical Operations
+
+```text
+AND   OR   XOR
+ANDI  ORI  XORI
+```
+
+### Shifts
+
+```text
+SLL   SRL   SRA
+SLLI  SRLI  SRAI
+```
+
+### Comparisons
+
+```text
+SLT   SLTU
+SLTI  SLTIU
+```
+
+### Upper Immediates
+
+```text
+LUI
+AUIPC
+```
+
+### Loads
+
+```text
+LB
+LH
+LW
+LBU
+LHU
+```
+
+### Stores
+
+```text
+SB
+SH
+SW
+```
+
+### Conditional Branches
+
+```text
+BEQ
+BNE
+BLT
+BGE
+BLTU
+BGEU
+```
+
+### Jumps
+
+```text
+JAL
+JALR
+```
+
+## Verification
+
+The processor is verified using a self-checking Verilog testbench.
+
+Six directed test programs currently exercise the processor.
+
+### Test 1 — ALU
+
+Tests basic arithmetic and logical execution.
+
+### Test 2 — Load/Store
+
+Tests word memory accesses and load-use hazard behavior.
+
+A real load-use dependency generates one pipeline stall.
+
+### Test 3 — Fibonacci
+
+Executes a control-flow-heavy Fibonacci program to exercise arithmetic, forwarding, branches, and repeated pipeline redirects.
+
+### Test 4 — Byte/Halfword Memory
+
+Verifies:
+
+```text
+LB
+LBU
+LH
+LHU
+LW
+```
+
+along with a dependent arithmetic operation.
+
+### Test 5 — Bubble Sort
+
+Executes an eight-element bubble-sort program.
+
+Expected result:
+
+```text
+3 11 12 22 25 47 64 90
+```
+
+The simulation verifies each sorted value automatically.
+
+### Test 6 — Pipeline Corner Cases
+
+A directed regression specifically verifies pipeline-control and forwarding behavior.
+
+It checks:
+
+* BEQ taken behavior
+* BNE taken and not-taken behavior
+* BLT
+* BGE
+* BLTU
+* BGEU
+* JAL redirection
+* JAL link-register writeback
+* immediate consumption of a JAL link value
+* JALR redirection
+* JALR link-register writeback
+* JALR target bit-zero clearing
+* immediate consumption of a JALR link value
+* wrong-path instruction flushing
+* LUI forwarding corner cases
+* AUIPC forwarding corner cases
+* suppression of false load-use hazards
+* preservation of genuine load-use stalls
+
+The directed test produces exactly one genuine load-use stall and eight expected control-flow redirects.
+
+Current regression result:
+
+```text
+===========================
+ALL TESTS PASSED
+===========================
+```
+
+## FPGA Synthesis
+
+The processor has been synthesized in Vivado 2025.2 targeting:
+
+```text
+xc7z020clg400-1
+```
+
+Current post-synthesis resource utilization:
+
+| Resource               |  Used | Available | Utilization |
+| ---------------------- | ----: | --------: | ----------: |
+| Slice LUTs             | 1,303 |    53,200 |       2.45% |
+| LUT as Logic           | 1,127 |    53,200 |       2.12% |
+| LUT as Distributed RAM |   176 |    17,400 |       1.01% |
+| Slice Registers        |   580 |   106,400 |       0.55% |
+| DSPs                   |     0 |       220 |       0.00% |
+| Block RAM Tiles        |     0 |       140 |       0.00% |
+
+The current instruction and data memories use asynchronous reads and synthesize as distributed LUT RAM rather than native block RAM.
+
+A future memory-system revision can introduce synchronous memory interfaces if block-RAM inference is desired.
+
+## Performance Counters
+
+The processor currently exposes counters for:
+
+```text
+instruction/writeback events
+pipeline stalls
+control-flow redirects
+```
+
+The current instruction counter increments on register-writeback events and therefore should not yet be interpreted as a complete architectural retired-instruction counter.
+
+As a result, CPI values printed by the current testbench are useful for internal comparison but are not presented as architectural CPI measurements.
+
+A future revision can propagate pipeline-valid state and count all retired instructions, including stores and branches.
+
+## Project Structure
+
+```text
+RV32I_Processor/
+│
+├── riscv_pipe.v
+├── control_unit.v
+├── alu.v
+├── regfile.v
+├── imm_gen.v
+│
+├── forwarding_unit.v
+├── hazard_unit.v
+│
+├── if_id_reg.v
+├── id_ex_reg.v
+├── ex_mem_reg.v
+├── mem_wb_reg.v
+│
+├── instr_mem.v
+├── data_mem.v
+│
+├── tb_riscv_pipe.v
+│
+├── test1.mem
+├── test2.mem
+├── test3.mem
+├── test4.mem
+├── test5_bubblesort.mem
+└── test6_cornercases.mem
+```
+
+## Tools
+
+* Verilog HDL
+* AMD Vivado 2025.2
+* XSim
+* Xilinx Zynq-7000 XC7Z020
+
+## Current Status
+
+The current RTL passes the complete six-test behavioral regression, including directed branch, jump, forwarding, hazard, memory, Fibonacci, and bubble-sort verification.
+
+Future work will focus on verification depth, architectural retirement tracking, memory implementation, and FPGA timing optimization.
