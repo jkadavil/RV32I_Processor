@@ -97,6 +97,7 @@ wire [6:0] id_funct7 = id_instr[31:25];
 
 wire        id_reg_write, id_mem_read, id_mem_write;
 wire        id_mem_to_reg, id_alu_src, id_branch, id_jump;
+wire        id_uses_rs1, id_uses_rs2;
 wire [3:0]  id_alu_ctrl;
 
 control_unit cu (
@@ -110,6 +111,8 @@ control_unit cu (
     .alu_src    (id_alu_src),
     .branch     (id_branch),
     .jump       (id_jump),
+    .uses_rs1   (id_uses_rs1),
+    .uses_rs2   (id_uses_rs2),
     .alu_ctrl   (id_alu_ctrl)
 );
 
@@ -144,6 +147,7 @@ imm_gen ig (
 wire        id_ex_flush;
 wire        ex_reg_write, ex_mem_read, ex_mem_write;
 wire        ex_mem_to_reg, ex_alu_src, ex_branch, ex_jump;
+wire        ex_uses_rs1, ex_uses_rs2;
 wire [3:0]  ex_alu_ctrl;
 wire [31:0] ex_pc, ex_rdata1, ex_rdata2, ex_imm;
 wire [4:0]  ex_rs1, ex_rs2, ex_rd;
@@ -161,6 +165,8 @@ id_ex_reg id_ex (
     .alu_src_in     (id_alu_src),
     .branch_in      (id_branch),
     .jump_in        (id_jump),
+    .uses_rs1_in    (id_uses_rs1),
+    .uses_rs2_in    (id_uses_rs2),
     .alu_ctrl_in    (id_alu_ctrl),
     .pc_in          (id_pc),
     .rdata1_in      (id_rdata1),
@@ -178,6 +184,8 @@ id_ex_reg id_ex (
     .alu_src_out    (ex_alu_src),
     .branch_out     (ex_branch),
     .jump_out       (ex_jump),
+    .uses_rs1_out   (ex_uses_rs1),
+    .uses_rs2_out   (ex_uses_rs2),
     .alu_ctrl_out   (ex_alu_ctrl),
     .pc_out         (ex_pc),
     .rdata1_out     (ex_rdata1),
@@ -206,8 +214,9 @@ wire [6:0]  wb_opcode;
 // MEM-stage ALU result needed for forwarding
 wire [31:0] mem_alu_result;
 
-// Forwarding mux: WB selects between mem data and ALU result
-wire [31:0] mem_wb_forward_val = wb_mem_to_reg ? wb_mem_rdata : wb_alu_result;
+// WB forwarding must use the exact architectural writeback value.
+// This correctly handles ALU ops, loads, JAL, and JALR.
+wire [31:0] wb_forward_val = wb_wdata;
 
 // ALU input A: LUI uses 0, AUIPC uses PC, others use rs1
 wire [31:0] ex_alu_a_base =
@@ -216,13 +225,13 @@ wire [31:0] ex_alu_a_base =
                                 ex_rdata1;
 
 wire [31:0] ex_alu_input_a =
-    (forward_a == 2'b10) ? mem_alu_result     :
-    (forward_a == 2'b01) ? mem_wb_forward_val :
+    (forward_a == 2'b10) ? mem_forward_val :
+    (forward_a == 2'b01) ? wb_forward_val  :
                            ex_alu_a_base;
 
 wire [31:0] ex_forwarded_b =
-    (forward_b == 2'b10) ? mem_alu_result     :
-    (forward_b == 2'b01) ? mem_wb_forward_val :
+    (forward_b == 2'b10) ? mem_forward_val :
+    (forward_b == 2'b01) ? wb_forward_val  :
                            ex_rdata2;
 
 wire [31:0] ex_alu_input_b = ex_alu_src ? ex_imm : ex_forwarded_b;
@@ -246,12 +255,18 @@ wire [31:0] ex_pc_jump =
     (ex_opcode == 7'b1100111) ? ((ex_alu_input_a + ex_imm) & ~32'b1) :
                                  (ex_pc + ex_imm);
 
-// Branch condition decode
+// Branch comparisons use the forwarded register operands directly.
+wire ex_eq  = (ex_alu_input_a == ex_forwarded_b);
+wire ex_lts = ($signed(ex_alu_input_a) < $signed(ex_forwarded_b));
+wire ex_ltu = (ex_alu_input_a < ex_forwarded_b);
+
 wire ex_branch_taken = ex_branch & (
-    (ex_funct3 == 3'b000 &&  ex_alu_zero)      ||  // BEQ
-    (ex_funct3 == 3'b001 && !ex_alu_zero)      ||  // BNE
-    (ex_funct3 == 3'b100 &&  ex_alu_result[0]) ||  // BLT
-    (ex_funct3 == 3'b101 && !ex_alu_result[0])     // BGE
+    (ex_funct3 == 3'b000 &&  ex_eq ) || // BEQ
+    (ex_funct3 == 3'b001 && !ex_eq ) || // BNE
+    (ex_funct3 == 3'b100 &&  ex_lts) || // BLT
+    (ex_funct3 == 3'b101 && !ex_lts) || // BGE
+    (ex_funct3 == 3'b110 &&  ex_ltu) || // BLTU
+    (ex_funct3 == 3'b111 && !ex_ltu)    // BGEU
 );
 
 wire [31:0] ex_pc_target = ex_jump ? ex_pc_jump : ex_pc_branch;
@@ -274,11 +289,17 @@ wire [4:0]  mem_rd;
 wire [2:0]  mem_funct3;
 wire [6:0]  mem_opcode;
 
+// Value produced by the instruction currently in MEM.
+// JAL/JALR write PC+4; ordinary register-writing instructions use ALU result.
+// Loads are deliberately blocked from MEM forwarding by forwarding_unit.
+wire [31:0] mem_forward_val = mem_jump ? mem_pc_plus4 : mem_alu_result;
+
 ex_mem_reg ex_mem (
     .clk             (clk),
     .rst             (rst),
-    // flush on EX redirect so speculative instructions don't commit
-    .flush           (ex_pc_sel),
+    // The instruction in EX caused the redirect and must continue.
+    // Only younger instructions in IF/ID and ID/EX are flushed.
+    .flush           (1'b0),
     .reg_write_in    (ex_reg_write),
     .mem_read_in     (ex_mem_read),
     .mem_write_in    (ex_mem_write),
@@ -372,6 +393,8 @@ wire hazard_id_ex_flush;
 hazard_unit hu (
     .id_rs1             (id_rs1),
     .id_rs2             (id_rs2),
+    .id_uses_rs1        (id_uses_rs1),
+    .id_uses_rs2        (id_uses_rs2),
     .ex_mem_read        (ex_mem_read),
     .ex_rd              (ex_rd),
     .stall              (hazard_stall),
@@ -382,8 +405,11 @@ hazard_unit hu (
 forwarding_unit fu (
     .ex_rs1        (ex_rs1),
     .ex_rs2        (ex_rs2),
+    .ex_uses_rs1   (ex_uses_rs1),
+    .ex_uses_rs2   (ex_uses_rs2),
     .mem_rd        (mem_rd),
     .mem_reg_write (mem_reg_write),
+    .mem_mem_read  (mem_mem_read),
     .wb_rd         (wb_rd),
     .wb_reg_write  (wb_reg_write),
     .forward_a     (forward_a),
