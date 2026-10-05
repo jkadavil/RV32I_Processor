@@ -11,6 +11,8 @@ module id_ex_reg (
     input         alu_src_in,
     input         branch_in,
     input         jump_in,
+    input         uses_rs1_in,
+    input         uses_rs2_in,
     input  [3:0]  alu_ctrl_in,
     // data
     input  [31:0] pc_in,
@@ -31,6 +33,8 @@ module id_ex_reg (
     output reg        alu_src_out,
     output reg        branch_out,
     output reg        jump_out,
+    output reg        uses_rs1_out,
+    output reg        uses_rs2_out,
     output reg [3:0]  alu_ctrl_out,
     output reg [31:0] pc_out,
     output reg [31:0] rdata1_out,
@@ -51,6 +55,8 @@ module id_ex_reg (
             alu_src_out    <= 0;
             branch_out     <= 0;
             jump_out       <= 0;
+            uses_rs1_out   <= 0;
+            uses_rs2_out   <= 0;
             alu_ctrl_out   <= 4'b0;
             pc_out         <= 32'b0;
             rdata1_out     <= 32'b0;
@@ -69,6 +75,8 @@ module id_ex_reg (
             alu_src_out    <= alu_src_in;
             branch_out     <= branch_in;
             jump_out       <= jump_in;
+            uses_rs1_out   <= uses_rs1_in;
+            uses_rs2_out   <= uses_rs2_in;
             alu_ctrl_out   <= alu_ctrl_in;
             pc_out         <= pc_in;
             rdata1_out     <= rdata1_in;
@@ -82,3 +90,4 @@ module id_ex_reg (
         end
     end
 endmodule
+
